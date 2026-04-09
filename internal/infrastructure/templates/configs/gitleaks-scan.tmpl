@@ -1,0 +1,122 @@
+apiVersion: "execution.securecodebox.io/v1"
+kind: Scan
+metadata:
+  name: "{{.ScanName}}"
+  namespace: "{{.Namespace}}"
+  annotations:
+    metadata.scan.securecodebox.io/git-repo-url: "{{.RepoURL}}"
+spec:
+  scanType: "gitleaks"
+  # Define a volume and mount it at /repo in the scan container
+  volumes:
+    - name: repo
+      emptyDir: {}
+    - name: rules
+      emptyDir: {}
+  volumeMounts:
+    - name: repo
+      mountPath: "/repo/"
+    - name: rules
+      mountPath: "/rules/"
+  # Define an init container to run the git clone for us
+  initContainers:
+    - name: "download-rules"
+      image: amazon/aws-cli:2.13.9
+      imagePullPolicy: IfNotPresent
+      resources:
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /rules/gitleaks
+          
+          echo "Testing connection to S3 endpoint..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls
+          
+          echo "Listing bucket contents..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls s3://fsp-scb-rules/gitleaks/
+          
+          echo "Downloading rules from S3..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 cp s3://fsp-scb-rules/gitleaks/gitleaks.toml /rules/gitleaks/gitleaks.toml
+          
+          echo "Verifying downloaded rules..."
+          if [ -f "/rules/gitleaks/gitleaks.toml" ]; then
+              size=$(ls -l "/rules/gitleaks/gitleaks.toml" | awk '{print $5}')
+              if [ "$size" -gt 0 ]; then
+                  echo "Rules file verified (Size: $size bytes)"
+                  echo "Download successful"
+              else
+                  echo "Rules file exists but is empty"
+                  exit 1
+              fi
+          else
+              echo "Rules file not found"
+              exit 1
+          fi
+
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: accesskey
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: secretkey
+        - name: ENDPOINT_URL
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: endpoint
+        - name: AWS_DEFAULT_REGION
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: region
+      volumeMounts:
+        - name: rules
+          mountPath: "/rules/"
+    - name: "git-clone"
+      image: alpine/git:v2.49.1
+      imagePullPolicy: IfNotPresent
+      # Specify that the "repo" volume should also be mounted on the
+      # initContainer
+      volumeMounts:
+        - name: repo
+          mountPath: "/repo/"
+      # Clone to /repo in the init container
+      command:
+        - git
+        - clone
+        - --branch
+        - "{{.Branch}}"
+        # Add access token to the URL for authenticated HTTPS clone
+        - "{{.RepoURLWithToken}}"
+        - /repo/
+      # Pull the access token into an env variable
+      env:
+        - name: GIT_TOKEN
+          value: "{{.AuthToken}}"
+          # valueFrom:
+          #   secretKeyRef:
+          #     name: github-token
+          #     key: token
+  parameters:
+    # Run Gitleaks in "detect" mode
+{{- if not .IsCommitScan}}
+    - --no-git
+{{- end}}
+    - "--log-opts={{if .IsCommitScan}}{{.BaseCommit}} -1{{else}}{{.Branch}}{{end}}"
+    # Point it at the location of the repository
+    - "-c"
+    - "/rules/gitleaks/gitleaks.toml"
+    - "--source"
+    - "/repo/"
+    - "--redact"

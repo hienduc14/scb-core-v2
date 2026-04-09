@@ -1,0 +1,57 @@
+apiVersion: execution.securecodebox.io/v1
+kind: Scan
+metadata:
+  name: "{{.ScanName}}"
+  namespace: "{{.Namespace}}"
+spec:
+  # Specify a Kubernetes volume that will be shared between the scanner and the initContainer
+  volumes:
+    - name: repository
+      emptyDir: {}
+
+  # Mount the volume in the scan container
+  volumeMounts:
+    - mountPath: /repo/
+      name: repository
+
+  # Specify an init container to clone the repository or copy IaC files
+  initContainers:
+    - name: provision-repo
+      image: alpine/git:v2.49.1
+      imagePullPolicy: IfNotPresent
+      volumeMounts:
+        - mountPath: /repo/
+          name: repository
+      command:
+        - git
+        - clone
+        - "{{.RepoURLWithToken}}"
+        - -b
+        - "{{.Branch}}"
+        - /repo
+      env:
+        - name: GIT_TOKEN
+          value: "{{.AuthToken}}"
+
+  # Parameterize the KICS scan itself
+  scanType: kics
+  # parameters:
+  #   - --path
+  #   - /repo
+  #   - --report-formats
+  #   - json
+  #   - --output-path
+  #   - /home/securecodebox
+  #   - --output-name
+  #   - kics-results.json
+  resources:
+    limits:
+      cpu: "3"
+      memory: "6Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+  # Define the output volume for scan results
+  volumeMounts:
+    - mountPath: /repo
+      name: repository

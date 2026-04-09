@@ -1,0 +1,140 @@
+apiVersion: "execution.securecodebox.io/v1"
+kind: Scan
+metadata:
+  name: "{{.ScanName}}"
+  namespace: "{{.Namespace}}"
+spec:
+  volumes:
+    - name: repository
+      emptyDir: {}
+    - name: local-rules
+      emptyDir: {}
+    - name: semgrepignore
+      configMap:
+        name: semgrepignore-config
+        items:
+          - key: semgrepignore
+            path: .semgrepignore
+  volumeMounts:
+    - mountPath: "/repo/"
+      name: repository
+    - mountPath: "/rules/"
+      name: local-rules
+    - mountPath: "/repo/.semgrepignore"
+      name: semgrepignore
+      subPath: .semgrepignore
+      # readOnly: true
+  initContainers:
+    - name: "download-rules"
+      image: amazon/aws-cli:2.13.9
+      resources:
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /rules/semgrep
+          
+          echo "Testing connection to S3 endpoint..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls
+          
+          echo "Listing bucket contents..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls s3://fsp-scb-rules/semgrep/
+          
+          echo "Downloading rules from S3..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 cp s3://fsp-scb-rules/semgrep/sast_rules.yaml /rules/semgrep/sast_rules.yaml
+          
+          echo "Verifying downloaded rules..."
+          if [ -f "/rules/semgrep/sast_rules.yaml" ]; then
+              size=$(ls -l "/rules/semgrep/sast_rules.yaml" | awk '{print $5}')
+              if [ "$size" -gt 0 ]; then
+                  echo "Rules file verified (Size: $size bytes)"
+                  echo "Download successful"
+              else
+                  echo "Rules file exists but is empty"
+                  exit 1
+              fi
+          else
+              echo "Rules file not found"
+              exit 1
+          fi
+
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: accesskey
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: secretkey
+        - name: ENDPOINT_URL
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: endpoint
+        - name: AWS_DEFAULT_REGION
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: region
+      volumeMounts:
+        - name: local-rules
+          mountPath: "/rules/"
+    # Container clone repository
+    - name: "provision-git"
+      image: alpine/git:v2.49.1
+      imagePullPolicy: IfNotPresent
+      resources:
+        limits:
+          cpu: "200m" 
+          memory: "256Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      volumeMounts:
+        - mountPath: "/repo/"
+          name: repository
+      command:
+        - git
+        - clone
+        - --branch
+        - "{{.Branch}}"
+        # - --depth
+        # - "2"
+        - --single-branch
+        - "{{.RepoURLWithToken}}"
+        - /repo
+      env:
+        - name: GIT_TOKEN
+          value: "{{.AuthToken}}"
+  scanType: "semgrep"
+  parameters:
+{{- if .IsCommitScan}}
+    - "--baseline-commit"
+    - "{{.BaseCommit}}^"
+{{- end}}
+    - "--json"
+    - "-o"
+    - "/home/securecodebox/semgrep-results.json"
+    - "--jobs"
+    - "50"
+    - "--config"
+    - "/rules/semgrep/sast_rules.yaml"
+    - "--debug"
+    - "--timeout"
+    - "5"
+    - "./"
+  resources:
+    limits:
+      cpu: "20"
+      memory: "10Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"

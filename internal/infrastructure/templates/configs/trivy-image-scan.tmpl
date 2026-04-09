@@ -1,0 +1,93 @@
+apiVersion: "execution.securecodebox.io/v1"
+kind: Scan
+metadata:
+  name: "{{.ScanName}}"
+  namespace: "{{.Namespace}}"
+spec:
+  scanType: "trivy-image"
+  # Define volumes for rules storage
+  volumes:
+    - name: rules
+      emptyDir: {}
+  volumeMounts:
+    - name: rules
+      mountPath: "/rules/"
+  # Init container to download rules from S3
+  initContainers:
+    - name: "download-rules"
+      image: amazon/aws-cli:2.13.9
+      imagePullPolicy: IfNotPresent
+      resources:
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /rules/trivy
+          
+          echo "Testing connection to S3 endpoint..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls
+          
+          echo "Listing bucket contents..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 ls s3://fsp-scb-rules/trivy/
+          
+          echo "Downloading rules from S3..."
+          aws --endpoint-url=${ENDPOINT_URL} s3 cp s3://fsp-scb-rules/trivy/secret.yaml /rules/trivy/secret.yaml
+          
+          echo "Verifying downloaded rules..."
+          if [ -f "/rules/trivy/secret.yaml" ]; then
+              size=$(ls -l "/rules/trivy/secret.yaml" | awk '{print $5}')
+              if [ "$size" -gt 0 ]; then
+                  echo "Rules file verified (Size: $size bytes)"
+                  echo "Download successful"
+              else
+                  echo "Rules file exists but is empty"
+                  exit 1
+              fi
+          else
+              echo "Rules file not found"
+              exit 1
+          fi
+
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: accesskey
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: secretkey
+        - name: ENDPOINT_URL
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: endpoint
+        - name: AWS_DEFAULT_REGION
+          valueFrom:
+            secretKeyRef:
+              name: s3-credentials
+              key: region
+      volumeMounts:
+        - name: rules
+          mountPath: "/rules/"
+  env:
+    - name: TRIVY_USERNAME
+      value: "{{.TrivyUsername}}"
+    - name: TRIVY_PASSWORD
+      value: "{{.TrivyPassword}}"
+  parameters:
+    - "--platform"
+    - "{{.PlatformTag}}"
+{{- if .IsInsecure}}
+    - "--insecure"
+{{- end}}
+    - "--secret-config"
+    - "/rules/trivy/secret.yaml"
+    - "{{.ImageRef}}"
